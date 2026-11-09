@@ -292,6 +292,15 @@ func setDirectTransport(rt http.RoundTripper) func() {
 // shared client, or a shallow copy carrying the test transport override when one
 // is installed. Copying keeps the shared client (and its connection pool)
 // untouched while background work may be inside Do().
+//
+// A per-account transport was tried here and removed. It could not do its job on
+// this plugin's only deployment target: the direct path is taken when the host
+// bridge is unavailable or on Windows, and production runs on Linux with the
+// bridge live, so the code never executed. The bridge cannot substitute for it
+// either — the host's callHostHTTPDo calls newHTTPClient(nil), whose transport is
+// a bare &http.Client{} on http.DefaultTransport, with no hook for a plugin to
+// supply its own RoundTripper. Connection-level isolation between accounts is
+// therefore outside this plugin's reach; header and body shape are not.
 func directHTTPClient() *http.Client {
 	client := sharedHTTPClient()
 	hostDirectTransportMu.RLock()

@@ -99,7 +99,10 @@ func pumpWithFailover(ctx context.Context, cancel context.CancelFunc, req execut
 		if err != nil {
 			return false, 0, err
 		}
-		backendHeaders(httpReq, cand.Auth)
+		// backendHeaders gzips the body and returns the bytes for the wire.
+		if wireBody := backendHeaders(httpReq, cand.Auth); len(wireBody) > 0 {
+			httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+		}
 		trace.beginAttempt(httpReq, cand.AuthID)
 		return pumpAttempt(httpReq, streamID, sseFramed, req.Model, upstreamModel, cand.AuthID, candUID(cand, authUID), started, collector, trace)
 	}, ctx)

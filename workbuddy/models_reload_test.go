@@ -5,7 +5,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,7 +57,7 @@ func (rr *reloadRecorder) start(t *testing.T) *httptest.Server {
 		rr.status = http.StatusOK
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body := readWireBody(t, r)
 		var payload struct {
 			ModelsRev string `json:"models_rev"`
 		}

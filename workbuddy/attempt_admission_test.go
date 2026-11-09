@@ -68,8 +68,8 @@ func TestRecoveryProbeExecutorPaths(t *testing.T) {
 								t.Fatalf("unexpected path %s", r.URL.Path)
 							}
 							calls++
-							requestBody, _ := io.ReadAll(r.Body)
-							if r.Header.Get("X-Conversation-ID") != stableConversationID(requestBody) {
+							requestBody := readWireBody(t, r)
+							if wireHeader(r, "X-Conversation-ID") != stableConversationID(requestBody) {
 								t.Fatal("probe changed CID")
 							}
 							var body map[string]any

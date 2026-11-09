@@ -1,5 +1,73 @@
 # Changelog
 
+## Unreleased
+
+### Chat requests look like the official client on the wire
+
+Three transport-level fixes, all aimed at the same thing: a chat request should
+not be distinguishable from an official one by shape alone. These cover the
+"channel check" and "request authenticity" layers, not account-level risk
+control — an account the upstream has restricted stays restricted.
+
+- **Header names keep their official spelling.** Go's `http.Header.Set`
+  canonicalizes keys, which silently rewrote `X-Conversation-ID` to
+  `X-Conversation-Id`, `X-B3-TraceId` to `X-B3-Traceid` and `X-IDE-Type` to
+  `X-Ide-Type`. Every identity and tracing header is now written through
+  `setWireHeader`, which stores the exact name and deletes any canonical
+  duplicate so a re-stamp cannot ship the same header twice. Internal readers
+  use `wireHeader`, because `Header.Get` canonicalizes the key it looks up and
+  would otherwise stop seeing our own headers.
+- **Chat is no longer a browser request.** `X-Requested-With: XMLHttpRequest`
+  and the `application/json, text/plain, */*` accept value are stripped from
+  chat calls; the login/refresh/keepalive endpoints keep them, because those
+  really are browser-driven.
+- **Chat bodies are gzipped.** `Content-Encoding: gzip` plus an accurate
+  `Content-Length`, applied in `backendHeaders` so all three attempt paths get
+  it. The compressed bytes are written back into `req.Body` as well as returned,
+  because the host bridge reads the body itself; a header that claims gzip over
+  plain text would be worse than no compression at all.
+
+### Connection isolation between accounts is out of reach, and was removed
+
+- The reference gateway isolates the connection pool per account so the upstream
+  cannot link two credentials through one TCP/TLS connection
+  (workbuddy2api-hub #429). That was implemented here and then removed, because
+  it could not take effect on this plugin's deployment target.
+- Why: the direct path is only taken when the host bridge is unavailable or on
+  Windows, and production runs on Linux with the bridge live, so a per-account
+  transport never executed. The bridge cannot stand in for it either — the host's
+  `callHostHTTPDo` builds its client with `newHTTPClient(nil)`, whose transport is
+  a bare `&http.Client{}` on the process-wide `http.DefaultTransport`, and
+  `internal/pluginhost` exposes no hook for a plugin to supply its own
+  `RoundTripper`.
+- What this means in practice: every account's chat traffic shares one connection
+  pool. Header and body shape are under this plugin's control; connection identity
+  is not. Do not expect a fix here without a host-side change.
+
+### Both realms present the CLI identity, and every id is a UUID
+
+- The Intl realm was stamped as the desktop `IDE` identity. That is the one
+  identity family nobody has reproduced faithfully: the reference gateway's own
+  desktop-alignment work was withdrawn by its author because too many fields
+  could only be inferred, and a half-copied desktop identity is a recognizable
+  "not the real client" signal. `identityFor()` now returns `CLI` for every
+  realm, so `User-Agent` is `CLI/<version> CodeBuddy/<version>` with
+  `X-IDE-Type`/`X-IDE-Name: CLI`, matching the shape reverse engineered from the
+  published `@tencent-ai/codebuddy-code` package — the family the CN realm
+  already served successfully.
+- Conversation and tracing ids were bare 32-char hex. They are now UUID strings
+  (`8-4-4-4-12`), the shape an official client sends; a non-UUID id is itself a
+  fingerprint the upstream's channel check can key on. `stableConversationID`
+  keeps its derivation from the conversation prefix, so the prompt-cache key is
+  unchanged — only the rendering differs.
+- The B3 pair still follows its own spec: `X-B3-TraceId` is the 32-hex canonical
+  form of the message UUID and `X-B3-SpanId` its first 16 hex. A dashed 36-char
+  trace id would make the upstream drop the pair.
+- Not addressed here: the stricter desktop/IDE wire family (`x-stainless-*`,
+  `acp-connection-id`, `X-B3-ParentSpanId`, four-segment b3). Those fields could
+  only be inferred, and the reference implementation withdrew exactly that
+  change, so they stay out until the upstream's desktop validation is known.
+
 ## 0.10.0
 
 ### Global traffic can move to the other Intl host when `codebuddy.ai` is blocked (issue #14)

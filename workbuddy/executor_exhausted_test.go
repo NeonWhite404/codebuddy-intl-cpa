@@ -57,9 +57,9 @@ func TestExecutorCreditFailoverIntegration(t *testing.T) {
 					if !strings.HasSuffix(r.URL.Path, "/v2/chat/completions") {
 						t.Fatalf("unexpected HTTP call: %s", r.URL.Path)
 					}
-					body, _ := io.ReadAll(r.Body)
+					body := readWireBody(t, r)
 					order = append(order, r.Header.Get("X-User-Id"))
-					cids = append(cids, r.Header.Get("X-Conversation-ID"))
+					cids = append(cids, wireHeader(r, "X-Conversation-ID"))
 					bodies = append(bodies, string(body))
 					status, payload := 429, `{"error":{"data":{"code":14018,"msg":"Credits exhausted"}}}`
 					if r.Header.Get("X-User-Id") == "uid-b" && !all {

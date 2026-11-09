@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -96,10 +95,13 @@ func TestCacheTraceDoesNotStorePromptOrCredentials(t *testing.T) {
 	if !strings.HasPrefix(tr.HostRequestID, "hash:") {
 		t.Fatal("untrusted metadata ID not hashed")
 	}
-	if tr.Attempts[0].CID != req.Header.Get("X-Conversation-ID") || tr.Attempts[0].Status != 200 {
+	if tr.Attempts[0].CID != wireHeader(req, "X-Conversation-ID") || tr.Attempts[0].Status != 200 {
 		t.Fatal("actual CID/status missing")
 	}
-	after, _ := io.ReadAll(req.Body)
+	// The body on the wire is now gzipped by backendHeaders, so compare against
+	// the decoded form: the invariant under test is that tracing did not ALTER
+	// the payload, not that it left it uncompressed.
+	after := readWireBody(t, req)
 	if !bytes.Equal(body, after) {
 		t.Fatal("trace changed body")
 	}

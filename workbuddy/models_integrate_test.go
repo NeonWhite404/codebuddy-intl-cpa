@@ -44,24 +44,24 @@ func TestModelsTestUsesChatIdentity(t *testing.T) {
 		t.Fatalf("handleModelsTest = %#v, want ok", out)
 	}
 
-	if ua := got.Get("User-Agent"); !strings.HasPrefix(ua, "IDE/") {
-		t.Errorf("User-Agent = %q, want the Intl IDE identity", ua)
+	if ua := getWireHeader(got, "User-Agent"); !strings.HasPrefix(ua, "CLI/") {
+		t.Errorf("User-Agent = %q, want the Intl CLI identity", ua)
 	}
 	for _, h := range []string{"X-IDE-Type", "X-IDE-Name"} {
-		if v := got.Get(h); v != "IDE" {
+		if v := getWireHeader(got, h); v != "CLI" {
 			t.Errorf("%s = %q, want IDE", h, v)
 		}
 	}
-	if v := got.Get("x-codebuddy-request"); v != "1" {
+	if v := getWireHeader(got, "x-codebuddy-request"); v != "1" {
 		t.Errorf("x-codebuddy-request = %q, want 1", v)
 	}
-	if got.Get("X-Product") != "SaaS" {
-		t.Errorf("X-Product = %q, want SaaS", got.Get("X-Product"))
+	if getWireHeader(got, "X-Product") != "SaaS" {
+		t.Errorf("X-Product = %q, want SaaS", getWireHeader(got, "X-Product"))
 	}
-	if turn, root := got.Get("X-Conversation-Request-ID"), got.Get("X-Root-Request-ID"); turn == "" || turn != root {
+	if turn, root := getWireHeader(got, "X-Conversation-Request-ID"), getWireHeader(got, "X-Root-Request-ID"); turn == "" || turn != root {
 		t.Errorf("conversation ids = %q / %q, want the root id to mirror the turn id", turn, root)
 	}
-	if trace, span := got.Get("X-B3-TraceId"), got.Get("X-B3-SpanId"); len(trace) != 32 || len(span) != 16 {
+	if trace, span := getWireHeader(got, "X-B3-TraceId"), getWireHeader(got, "X-B3-SpanId"); len(trace) != 32 || len(span) != 16 {
 		t.Errorf("B3 pair = %q/%q, want 32- and 16-hex ids", trace, span)
 	} else if span != trace[:16] {
 		t.Errorf("X-B3-SpanId %q must derive from X-B3-TraceId %q", span, trace)
@@ -90,10 +90,10 @@ func TestModelsTestUsesCLIIdentityForCN(t *testing.T) {
 	}
 
 	_ = handleModelsTest(pluginapi.ManagementRequest{Body: []byte(`{"realm":"cn","auth":"idx-cn","model":"glm-5.3"}`)})
-	if ua := got.Get("User-Agent"); !strings.HasPrefix(ua, "CLI/") {
+	if ua := getWireHeader(got, "User-Agent"); !strings.HasPrefix(ua, "CLI/") {
 		t.Errorf("User-Agent = %q, want the CN CLI identity", ua)
 	}
-	if v := got.Get("X-IDE-Type"); v != "CLI" {
+	if v := getWireHeader(got, "X-IDE-Type"); v != "CLI" {
 		t.Errorf("X-IDE-Type = %q, want CLI", v)
 	}
 }

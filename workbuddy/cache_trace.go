@@ -271,7 +271,7 @@ func (t *requestCacheTrace) beginAttempt(req *http.Request, authID string) int {
 	if t == nil {
 		return -1
 	}
-	a := cacheTraceAttempt{AuthID: traceSafeID(authID), CID: traceSafeID(req.Header.Get("X-Conversation-ID")), UpstreamRequestID: traceSafeID(req.Header.Get("X-Request-ID")), StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	a := cacheTraceAttempt{AuthID: traceSafeID(authID), CID: traceSafeID(wireHeader(req, "X-Conversation-ID")), UpstreamRequestID: traceSafeID(wireHeader(req, "X-Request-ID")), StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	t.Attempts = append(t.Attempts, a)
 	fmt.Fprintf(os.Stderr, "[workbuddy] cache-trace id=%s attempt=%d auth=%s cid=%s upstream_request=%s bytes=%d messages=%d\n", t.RequestID, len(t.Attempts), a.AuthID, a.CID, a.UpstreamRequestID, t.Upstream.BodyBytes, t.Upstream.MessageCount)
 	return len(t.Attempts) - 1

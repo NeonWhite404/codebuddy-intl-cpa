@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,7 +141,7 @@ func TestSendGrowthActivityPayload(t *testing.T) {
 		if !strings.HasSuffix(r.URL.Path, growthReportPath) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		body, _ := io.ReadAll(r.Body)
+		body := readWireBody(t, r)
 		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatalf("report body is not a JSON array: %v (%s)", err, body)
 		}

@@ -37,9 +37,9 @@ func TestIdentityForRealm(t *testing.T) {
 		domain string
 		want   string
 	}{
-		{"intl codebuddy host", "www.codebuddy.ai", "IDE"},
-		{"intl workbuddy host with scheme and path", "https://www.workbuddy.ai/", "IDE"},
-		{"intl bare domain", "codebuddy.ai", "IDE"},
+		{"intl codebuddy host", "www.codebuddy.ai", "CLI"},
+		{"intl workbuddy host with scheme and path", "https://www.workbuddy.ai/", "CLI"},
+		{"intl bare domain", "codebuddy.ai", "CLI"},
 		{"cn domain", "www.codebuddy.cn", "CLI"},
 		{"cn gateway", "copilot.tencent.com", "CLI"},
 		{"empty domain stays legacy cn", "", "CLI"},
@@ -116,22 +116,25 @@ func TestApplyIdentityHeadersPerRealm(t *testing.T) {
 	intl.Auth.Domain = "www.codebuddy.ai"
 	req, _ := http.NewRequest(http.MethodPost, "https://www.codebuddy.ai/v2/chat/completions", nil)
 	applyIdentityHeaders(req, intl)
-	if got := req.Header.Get("User-Agent"); !strings.HasPrefix(got, "IDE/") || !strings.Contains(got, "CodeBuddy/") {
-		t.Errorf("intl User-Agent = %q, want IDE/<version> CodeBuddy/<version>", got)
+	// The Intl realm presents the CLI family: the desktop/IDE wire shape is the
+	// one the upstream validates most strictly and the one this plugin cannot
+	// reproduce faithfully, so both realms send the reverse-engineered CLI shape.
+	if got := wireHeader(req, "User-Agent"); !strings.HasPrefix(got, "CLI/") || !strings.Contains(got, "CodeBuddy/") {
+		t.Errorf("intl User-Agent = %q, want CLI/<version> CodeBuddy/<version>", got)
 	}
-	if got := req.Header.Get("X-IDE-Type"); got != "IDE" {
-		t.Errorf("intl X-IDE-Type = %q, want IDE", got)
+	if got := wireHeader(req, "X-IDE-Type"); got != "CLI" {
+		t.Errorf("intl X-IDE-Type = %q, want CLI", got)
 	}
-	if got := req.Header.Get("X-IDE-Name"); got != "IDE" {
-		t.Errorf("intl X-IDE-Name = %q, want IDE", got)
+	if got := wireHeader(req, "X-IDE-Name"); got != "CLI" {
+		t.Errorf("intl X-IDE-Name = %q, want CLI", got)
 	}
-	if got := req.Header.Get("x-codebuddy-request"); got != "1" {
+	if got := wireHeader(req, "x-codebuddy-request"); got != "1" {
 		t.Errorf("intl x-codebuddy-request = %q, want 1", got)
 	}
-	if got := req.Header.Get("Accept"); got != "text/event-stream" {
+	if got := wireHeader(req, "Accept"); got != "text/event-stream" {
 		t.Errorf("Accept = %q, want text/event-stream", got)
 	}
-	if got := req.Header.Get("X-Device-Token"); got != "" {
+	if got := wireHeader(req, "X-Device-Token"); got != "" {
 		t.Errorf("X-Device-Token = %q, want omitted when the account has none", got)
 	}
 
@@ -139,10 +142,10 @@ func TestApplyIdentityHeadersPerRealm(t *testing.T) {
 	cn.Auth.Domain = "www.codebuddy.cn"
 	reqCN, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
 	applyIdentityHeaders(reqCN, cn)
-	if got := reqCN.Header.Get("User-Agent"); !strings.HasPrefix(got, "CLI/") {
+	if got := wireHeader(reqCN, "User-Agent"); !strings.HasPrefix(got, "CLI/") {
 		t.Errorf("cn User-Agent = %q, want CLI/<version> CodeBuddy/<version>", got)
 	}
-	if got := reqCN.Header.Get("X-IDE-Type"); got != "CLI" {
+	if got := wireHeader(reqCN, "X-IDE-Type"); got != "CLI" {
 		t.Errorf("cn X-IDE-Type = %q, want CLI", got)
 	}
 }
@@ -151,37 +154,37 @@ func TestApplyConversationHeaders(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "https://www.codebuddy.ai/v2/chat/completions", nil)
 	turnID, messageID := applyConversationHeaders(req, "stable-conversation")
 
-	if got := req.Header.Get("X-Conversation-ID"); got != "stable-conversation" {
+	if got := wireHeader(req, "X-Conversation-ID"); got != "stable-conversation" {
 		t.Errorf("X-Conversation-ID = %q, want the stable conversation id", got)
 	}
-	if got := req.Header.Get("X-Conversation-Request-ID"); got != turnID || got == "" {
+	if got := wireHeader(req, "X-Conversation-Request-ID"); got != turnID || got == "" {
 		t.Errorf("X-Conversation-Request-ID = %q, want %q", got, turnID)
 	}
-	if got := req.Header.Get("X-Root-Request-ID"); got != turnID {
+	if got := wireHeader(req, "X-Root-Request-ID"); got != turnID {
 		t.Errorf("X-Root-Request-ID = %q, want the turn id %q", got, turnID)
 	}
-	if got := req.Header.Get("X-Conversation-Message-ID"); got != messageID || got == "" {
+	if got := wireHeader(req, "X-Conversation-Message-ID"); got != messageID || got == "" {
 		t.Errorf("X-Conversation-Message-ID = %q, want %q", got, messageID)
 	}
-	if got := req.Header.Get("X-Request-ID"); got != messageID {
+	if got := wireHeader(req, "X-Request-ID"); got != messageID {
 		t.Errorf("X-Request-ID = %q, want the message id %q", got, messageID)
 	}
 	// B3: trace must be 32 hex and span 16 hex, or the upstream drops the pair.
-	trace := req.Header.Get("X-B3-TraceId")
-	span := req.Header.Get("X-B3-SpanId")
+	trace := wireHeader(req, "X-B3-TraceId")
+	span := wireHeader(req, "X-B3-SpanId")
 	if len(trace) != 32 || !isLowerHex(trace) {
 		t.Errorf("X-B3-TraceId = %q, want 32 lowercase hex chars", trace)
 	}
 	if len(span) != 16 || !isLowerHex(span) {
 		t.Errorf("X-B3-SpanId = %q, want 16 lowercase hex chars", span)
 	}
-	if trace != messageID || span != messageID[:16] {
-		t.Errorf("B3 pair must derive from the message id: trace=%q span=%q message=%q", trace, span, messageID)
+	if trace != strings.ReplaceAll(messageID, "-", "") || span != strings.ReplaceAll(messageID, "-", "")[:16] {
+		t.Errorf("B3 pair must derive from the message id's canonical hex: trace=%q span=%q message=%q", trace, span, messageID)
 	}
-	if got := req.Header.Get("X-B3-Sampled"); got != "1" {
+	if got := wireHeader(req, "X-B3-Sampled"); got != "1" {
 		t.Errorf("X-B3-Sampled = %q, want 1", got)
 	}
-	if got := req.Header.Get("x-trace-id"); got != turnID {
+	if got := wireHeader(req, "x-trace-id"); got != turnID {
 		t.Errorf("x-trace-id = %q, want the turn id %q", got, turnID)
 	}
 
@@ -191,9 +194,40 @@ func TestApplyConversationHeaders(t *testing.T) {
 	if turnID2 == "" || messageID2 == "" {
 		t.Error("empty conversation id must still yield fresh turn/message ids")
 	}
-	if got := reqNoCID.Header.Get("X-Conversation-ID"); len(got) != 32 {
-		t.Errorf("generated X-Conversation-ID = %q, want 32 hex chars", got)
+	// Every id is UUID-shaped, not bare hex: a 32-char hex id is itself a
+	// fingerprint the upstream channel check can key on.
+	for _, id := range []string{wireHeader(reqNoCID, "X-Conversation-ID"), turnID2, messageID2} {
+		if !isUUID(id) {
+			t.Errorf("generated id = %q, want UUID shape", id)
+		}
 	}
+}
+
+// isUUID reports whether s is an 8-4-4-4-12 lowercase hex UUID with the RFC 4122
+// variant bits set. The version nibble is not pinned to one value: randomUUID
+// leaves it random while formatUUID stamps 8, and both are valid UUIDs.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+	}
+	// Variant bits 10xx: the first nibble of the 4th group is 8, 9, a or b.
+	switch s[19] {
+	case '8', '9', 'a', 'b':
+		return true
+	}
+	return false
 }
 
 func isLowerHex(s string) bool {

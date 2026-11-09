@@ -148,7 +148,7 @@ func TestExecutorRestoresOriginalDeveloperRoles(t *testing.T) {
 					return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"unrelated"}`))}, nil
 				}
 				calls++
-				raw, _ := io.ReadAll(r.Body)
+				raw := readWireBody(t, r)
 				var body map[string]any
 				if err := json.Unmarshal(raw, &body); err != nil {
 					t.Fatal(err)

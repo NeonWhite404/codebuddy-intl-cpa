@@ -419,7 +419,10 @@ func upstreamAttempt(ctx context.Context, body []byte, model string, cand *failo
 	if err != nil {
 		return nil, err
 	}
-	backendHeaders(httpReq, cand.Auth)
+	// backendHeaders gzips the body and returns the bytes that go on the wire.
+	if wireBody := backendHeaders(httpReq, cand.Auth); wireBody != nil && len(wireBody) > 0 {
+		httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+	}
 	trace := firstCacheTrace(traces)
 	attempt := trace.beginAttempt(httpReq, cand.AuthID)
 	stream, statusCode, _, err := hostHTTPDoStream(httpReq)

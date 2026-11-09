@@ -59,6 +59,7 @@ import "C"
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -70,6 +71,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -650,6 +652,12 @@ func parseStored(raw []byte) (*storedAuth, error) {
 // prefix (system + first user text), NOT the whole body — the body grows on
 // every turn, so hashing it would rotate the conversation id each turn and
 // defeat the cache for multi-turn coding-agent sessions.
+//
+// The digest is rendered in UUID shape (8-4-4-4-12, RFC 4122 version 8 variant
+// bits) because that is the shape an official client sends. A bare 32-char hex
+// string is itself a fingerprint: the upstream's channel check reads the
+// conversation family and a non-UUID id stands out. Keeping the derivation
+// stable means prompt-cache identity is unchanged — only the rendering is.
 func stableConversationID(body []byte) string {
 	var req struct {
 		Messages []struct {
@@ -679,7 +687,29 @@ func stableConversationID(body []byte) string {
 		prefix = string(body)
 	}
 	h := sha256.Sum256([]byte(prefix))
-	return hex.EncodeToString(h[:16])
+	return formatUUID(h[:16])
+}
+
+// formatUUID renders 16 bytes as an RFC 4122 UUID string. Version and variant
+// bits are overwritten (version 8 "custom", RFC 4122 variant) so the result is
+// a well-formed UUID that any parser accepts, while the remaining 122 bits keep
+// the digest's uniqueness — a truncated hash stays collision-safe.
+func formatUUID(b []byte) string {
+	if len(b) < 16 {
+		return ""
+	}
+	var u [16]byte
+	copy(u[:], b[:16])
+	u[6] = (u[6] & 0x0f) | 0x80 // version 8: custom, not derived from a name
+	u[8] = (u[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
+// randomUUID returns a random UUID string for the request-scoped ids.
+func randomUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return formatUUID(b)
 }
 
 func randomHex(n int) string {
@@ -688,6 +718,12 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// commonHeaders applies the headers shared by the non-chat upstream calls
+// (OAuth login, token refresh, keepalive, billing).
+//
+// It deliberately still sends `X-Requested-With`: those endpoints are hit by the
+// browser-facing login flow and the reference clients keep the browser-ish shape
+// there. The chat path strips it — see backendHeaders.
 func commonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
@@ -731,35 +767,48 @@ func endpointModelsFor(sa *storedAuth) string {
 
 // backendHeaders applies auth-derived headers to a chat completion request.
 // Empty fields are signalled via the X-No-* convention used by CodeBuddy.
-func backendHeaders(req *http.Request, sa *storedAuth) {
+//
+// Chat is not a browser call: no official client sends `X-Requested-With` (or an
+// `Accept` that mixes JSON with text/plain) on a completions request, so both are
+// removed here. A browser-shaped chat request is one more signal the upstream's
+// channel check can act on, and commonHeaders still stamps them for the
+// login/refresh endpoints that really are browser-driven.
+//
+// The body is gzipped here rather than at each call site: every chat attempt goes
+// through this function, and the official clients send `Content-Encoding: gzip`
+// on completions. The returned body is what must be written to the wire; the
+// caller's earlier slice is untouched.
+func backendHeaders(req *http.Request, sa *storedAuth) []byte {
 	commonHeaders(req)
+	// Drop the browser family; applyIdentityHeaders re-stamps Accept below.
+	delete(req.Header, "X-Requested-With")
 	if sa.Auth.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
+		setWireHeader(req, "Authorization", "Bearer "+sa.Auth.AccessToken)
 	} else {
-		req.Header.Set("X-No-Authorization", "1")
+		setWireHeader(req, "X-No-Authorization", "1")
 	}
 	if sa.Account.UID != "" {
-		req.Header.Set("X-User-Id", sa.Account.UID)
+		setWireHeader(req, "X-User-Id", sa.Account.UID)
 	} else {
-		req.Header.Set("X-No-User-Id", "1")
+		setWireHeader(req, "X-No-User-Id", "1")
 	}
 	if sa.Account.EnterpriseID != "" {
-		req.Header.Set("X-Enterprise-Id", sa.Account.EnterpriseID)
+		setWireHeader(req, "X-Enterprise-Id", sa.Account.EnterpriseID)
 	} else {
-		req.Header.Set("X-No-Enterprise-Id", "1")
+		setWireHeader(req, "X-No-Enterprise-Id", "1")
 	}
 	// SECURITY: do NOT send X-Refresh-Token on chat completions. refresh_token is
 	// a long-lived credential that can mint new access_tokens; it only belongs on
 	// the refresh endpoint (handleRefreshAuth). Sending it to chat upstream leaks
 	// the credential into upstream request logs on every chat call.
 	if sa.Auth.Domain != "" {
-		req.Header.Set("X-Domain", sa.Auth.Domain)
+		setWireHeader(req, "X-Domain", sa.Auth.Domain)
 	} else {
-		req.Header.Set("X-No-Department-Info", "1")
+		setWireHeader(req, "X-No-Department-Info", "1")
 	}
-	// Client identity the upstream validates: realm-aware UA (IDE for Intl, CLI
-	// for CN), X-Product, X-IDE-Type/X-IDE-Name, x-codebuddy-request and the
-	// optional device token. See client_identity.go for why this matters (11128).
+	// Client identity the upstream validates: X-Product, X-IDE-Type/X-IDE-Name,
+	// x-codebuddy-request and the optional device token. Every realm presents the
+	// CLI family. See client_identity.go for why this matters (11128).
 	applyIdentityHeaders(req, sa)
 
 	// Stable conversation ID enables CodeBuddy prompt cache (KV cache hit).
@@ -777,8 +826,55 @@ func backendHeaders(req *http.Request, sa *storedAuth) {
 	// Override Origin/Referer for Global accounts so the upstream doesn't
 	// reject the request as cross-origin.
 	origin := originRefererFor(sa)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
+	setWireHeader(req, "Origin", origin)
+	setWireHeader(req, "Referer", origin+"/")
+
+	// Gzip the body the way the official clients do. Done last so every header
+	// above is already stamped and the CID derivation saw the plain bytes.
+	return gzipChatBody(req)
+}
+
+// gzipChatBody compresses req's body in place and returns the compressed bytes
+// that must actually be written to the wire.
+//
+// `http.Request` has no hook for "serialize the body differently than the caller
+// provided", and the host bridge reads req.Body itself (see hostHTTPDoStream), so
+// setting Content-Encoding alone would send compression headers over plain text —
+// worse than not compressing at all. Instead the compressed bytes are written back
+// into req.Body and also returned, so both the bridge path (which re-reads the
+// body) and the direct path (which is handed the returned slice) send the same
+// bytes. A body that is empty, already encoded, or fails to compress is left
+// untouched and Content-Encoding is not set.
+func gzipChatBody(req *http.Request) []byte {
+	if req == nil || req.Body == nil {
+		return nil
+	}
+	if enc := wireHeader(req, "Content-Encoding"); enc != "" {
+		return nil
+	}
+	plain, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	if err != nil || len(plain) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(plain); err != nil {
+		// Compression failed: forward the original bytes rather than a corrupt body.
+		req.Body = io.NopCloser(bytes.NewReader(plain))
+		setWireHeader(req, "Content-Length", strconv.Itoa(len(plain)))
+		return plain
+	}
+	if err := zw.Close(); err != nil {
+		req.Body = io.NopCloser(bytes.NewReader(plain))
+		setWireHeader(req, "Content-Length", strconv.Itoa(len(plain)))
+		return plain
+	}
+	compressed := buf.Bytes()
+	setWireHeader(req, "Content-Encoding", "gzip")
+	setWireHeader(req, "Content-Length", strconv.Itoa(len(compressed)))
+	req.Body = io.NopCloser(bytes.NewReader(compressed))
+	return compressed
 }
 
 // -----------------------------------------------------------------------------
@@ -1061,7 +1157,10 @@ func collectStreamAttempt(body []byte, cand *failoverCandidate, sseFramed bool, 
 	if err != nil {
 		return nil, 0, err
 	}
-	backendHeaders(httpReq, cand.Auth)
+	// backendHeaders gzips the body and returns the bytes for the wire.
+	if wireBody := backendHeaders(httpReq, cand.Auth); len(wireBody) > 0 {
+		httpReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+	}
 	trace := firstCacheTrace(traces)
 	attempt := trace.beginAttempt(httpReq, cand.AuthID)
 	// Compliance: route via host.http.do_stream so request-log captures the call.
