@@ -243,34 +243,114 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestSanitizeBlockedTemplates_DeepSeekHarness(t *testing.T) {
+	// The identity sentence is DROPPED. The official client separates the brand
+	// with U+200B, and the upstream refuses the sentence wherever it sits, so
+	// leading padding must not save it either. Only the sentence goes; the line
+	// break after it must stay, or two paragraphs would be joined.
 	cases := []struct{ name, in, want string }{
 		{
-			name: "verbatim",
-			in:   "You are an AI agent powered by DeepSeek Harness. Follow the rules.",
-			want: "You are an AI assistant. Follow the rules.",
+			name: "zero-width separator",
+			in:   "You are an AI agent powered by DeepSeek\u200bHarness.\nNext line.",
+			want: "\nNext line.",
 		},
 		{
 			name: "no trailing period",
-			in:   "You are an AI agent powered by DeepSeek Harness",
-			want: "You are an AI assistant",
+			in:   "You are an AI agent powered by DeepSeek\u200bHarness\nNext line.",
+			want: "\nNext line.",
 		},
 		{
-			name: "case drift",
-			in:   "you are an AI agent powered by deepseek harness.",
-			want: "You are an AI assistant.",
+			name: "leading BOM does not save it",
+			in:   "\ufeffYou are an AI agent powered by DeepSeek\u200bHarness.\nNext line.",
+			want: "\ufeff\nNext line.",
 		},
 		{
-			name: "embedded in a long prompt",
-			in:   "Intro line.\nYou are an AI agent powered by DeepSeek Harness.\nTools follow.",
-			want: "Intro line.\nYou are an AI assistant.\nTools follow.",
+			name: "leading spaces do not save it",
+			in:   "   You are an AI agent powered by DeepSeek\u200bHarness.\nNext line.",
+			want: "   \nNext line.",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeBlockedTemplates(tc.in); got != tc.want {
+			got := sanitizeBlockedTemplates(tc.in)
+			if got == tc.in {
+				t.Fatalf("blocklisted sentence survived: %q", got)
+			}
+			if strings.Contains(got, "AI agent powered by") {
+				t.Fatalf("identity sentence survived: %q", got)
+			}
+			if got != tc.want {
 				t.Fatalf("sanitizeBlockedTemplates(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// The persona sentence is a DIFFERENT sentence with a different trigger: it
+// carries no brand word, so the upstream must match the "coding agent powered by"
+// frame and rewriting the model name would not help. It is reworded, not deleted,
+// and the model id is kept because it tells the model which model serves it.
+func TestSanitizeBlockedTemplates_PersonaPoweredBy(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{
+			name: "cn model id",
+			in:   "You are a coding agent powered by the hy4-preview model.\nNext line.",
+			want: "You are a coding agent running on hy4-preview.\nNext line.",
+		},
+		{
+			name: "intl model id with dots",
+			in:   "You are a coding agent powered by the deepseek-v4.1-flash model.\nNext line.",
+			want: "You are a coding agent running on deepseek-v4.1-flash.\nNext line.",
+		},
+		{
+			name: "no leading article",
+			in:   "You are a coding agent powered by gpt-6.1-sol model.",
+			want: "You are a coding agent running on gpt-6.1-sol.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeBlockedTemplates(tc.in)
+			if strings.Contains(got, "coding agent powered by") {
+				t.Fatalf("persona frame survived: %q", got)
+			}
+			if got != tc.want {
+				t.Fatalf("sanitizeBlockedTemplates(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The file-reference paragraph keeps its wording but loses the @ glyph, which is
+// part of what the channel check matches.
+func TestSanitizeBlockedTemplates_FileReferenceAt(t *testing.T) {
+	in := "Tokens prefixed with @ are paths the user explicitly referenced. @\"...\" quotes a path.\nNext line."
+	got := sanitizeBlockedTemplates(in)
+	if strings.Contains(got, "Tokens prefixed with @") {
+		t.Fatalf("@ survived in the file-reference paragraph: %q", got)
+	}
+	if !strings.Contains(got, "Tokens prefixed with (at) are paths") {
+		t.Fatalf("paragraph lost its wording: %q", got)
+	}
+	if !strings.Contains(got, "Next line") {
+		t.Fatalf("following line was consumed: %q", got)
+	}
+	// An @ outside that paragraph must survive: on its own the upstream accepts it.
+	const plain = "mail me at a@b.com or look at @decorator"
+	if out := sanitizeBlockedTemplates(plain); out != plain {
+		t.Fatalf("an unrelated @ was rewritten: %q", out)
+	}
+}
+
+// No rule may consume a newline and join two paragraphs together.
+func TestSanitizeBlockedTemplates_KeepsLineStructure(t *testing.T) {
+	in := "You are an AI agent powered by DeepSeek\u200bHarness.\n" +
+		"You are a coding agent powered by the deepseek-v4.1-flash model.\n" +
+		"Tokens prefixed with @ are paths.\n" +
+		"Plain line."
+	out := sanitizeBlockedTemplates(in)
+	if strings.Count(in, "\n") != strings.Count(out, "\n") {
+		t.Fatalf("line count changed: %d -> %d\n%q",
+			strings.Count(in, "\n"), strings.Count(out, "\n"), out)
 	}
 }
 
@@ -295,12 +375,14 @@ func TestSanitizeBlockedTemplates_DeepSeekHarnessNearMisses(t *testing.T) {
 // The rewrite must survive the whole request pipeline (system message inside a
 // chat-completions body), not just the string helper.
 func TestRewriteSystemForUpstream_DeepSeekHarness(t *testing.T) {
-	in := []byte(`{"messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness. Be brief."},{"role":"user","content":"hi"}]}`)
+	// End-to-end through the whole request pipeline: the identity sentence must be
+	// gone from the system message while the rest of the prompt is untouched.
+	in := []byte(`{"messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek\u200bHarness.\nBe brief."},{"role":"user","content":"hi"}]}`)
 	out := rewriteSystemForUpstream(in)
-	if strings.Contains(string(out), "powered by DeepSeek Harness") {
-		t.Fatalf("harness intro survived: %s", string(out))
+	if strings.Contains(string(out), "AI agent powered by") {
+		t.Fatalf("identity sentence survived: %s", string(out))
 	}
-	if !strings.Contains(string(out), "You are an AI assistant. Be brief.") {
+	if !strings.Contains(string(out), "Be brief.") {
 		t.Fatalf("rewrite lost the surrounding prompt: %s", string(out))
 	}
 }

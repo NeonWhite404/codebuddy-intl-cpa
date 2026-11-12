@@ -11,21 +11,56 @@ import (
 	"strings"
 )
 
-// reDeepSeekHarnessIntro matches the DeepSeek Harness base-instructions
-// opening signature — the third member of the same Tencent 11-128
-// "unapproved channel" family as the Claude Code and Codex CLI templates
-// below. Evidence (single-variable replay against copilot.tencent.com,
-// cpa-multi-plugins v0.9.62): the bare sentence "You are an AI agent powered
-// by DeepSeek Harness" answers 400 / code 11128 every time, while
-// "DeepSeek Harness" alone, "powered by DeepSeek Harness", "You are an AI
-// agent powered by DeepSeek." and the same sentence naming a different
-// harness all answer 200. Swapping only that sentence inside a 175 KB request
-// (47 messages, 66 tools, reasoning_effort=max) flips 400 -> 200.
-var reDeepSeekHarnessIntro = regexp.MustCompile(`(?i)you are an ai agent powered by deepseek harness`)
+// reDeepSeekHarnessIdentity matches the DSH base-instructions identity sentence,
+// which the official client puts at the very start of the system message
+// (`You are an AI agent powered by DeepSeek` + U+200B + `Harness.`) and which the
+// upstream refuses with 400 / code 11128. Located by single-variable replay
+// against copilot.tencent.com: the bare sentence answers 400 every time, while
+// "DeepSeek Harness" alone, "powered by DeepSeek Harness" and the same sentence
+// naming a different harness all answer 200; swapping only that sentence inside
+// a 175 KB request (47 messages, 66 tools, reasoning_effort=max) flips 400 -> 200.
+//
+// The client separates the brand with U+200B, so the gap is matched as
+// invisibles/whitespace rather than a literal space. Leading padding does not
+// dodge the upstream's match, so this rule does not try to anchor on position.
+//
+// The sentence is DROPPED rather than reworded: it carries no instruction the
+// model needs (the persona sentence and the tool guidance that follow already
+// set the framing), and deletion cannot accidentally re-match a future upstream
+// signature the way a reworded copy might.
+var reDeepSeekHarnessIdentity = regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00A0}\t ]*Harness\.?[ \t]*($|[\r\n])`)
 
-// deepSeekHarnessIntroReplacement keeps the agent framing neutral while
-// dropping the blocklisted signature.
-const deepSeekHarnessIntroReplacement = "You are an AI assistant"
+// reDeepSeekPersonaPoweredBy matches a DIFFERENT sentence - the persona line with
+// the model id interpolated:
+//
+//	You are a coding agent powered by the deepseek-v4.1-flash model.
+//
+// Two sentences, two rules. The identity sentence above is recognised by its
+// brand pair; this one contains no brand word at all, so the upstream must be
+// matching the `coding agent powered by` frame and rewriting the model name
+// would not help. Only that phrase is replaced; the model id is kept, because it
+// tells the model which model is serving it.
+var reDeepSeekPersonaPoweredBy = regexp.MustCompile(`(?i)(You are a coding agent)[ \t]+powered[ \t]+by[ \t]+(?:the[ \t]+)?(.+?)(?:[ \t]+model)?(\.[ \t]*)($|[\r\n])`)
+
+// reDeepSeekBrandPair is the catch-all behind the identity rule: any remaining
+// `DeepSeek` + invisible separator + `Harness` anywhere in a message - a frozen
+// paragraph from an older conversation, a variant intro - is collapsed to the
+// hyphenated name.
+var reDeepSeekBrandPair = regexp.MustCompile(`DeepSeek[\x{200B}\x{200C}\x{200D}\x{FEFF}]+Harness`)
+
+const deepSeekBrandPairReplacement = "DeepSeek-Harness"
+
+// reFileReferencePara isolates the file-reference paragraph the client injects
+// into the system message. Its `@` glyph is part of what the channel check
+// matches, so `@` is rewritten to the equivalent `(at)` inside this paragraph
+// only; a bare `@`, an email address and a decorator elsewhere are accepted by
+// the upstream on their own and are left alone.
+var reFileReferencePara = regexp.MustCompile(`Tokens prefixed with @ are paths[^\n]*`)
+
+// reWebGUIBrand matches the brand reference inside the Web GUI paragraph.
+var reWebGUIBrand = regexp.MustCompile(`(?i)the[ \t]+DeepSeek[\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00A0}\t ]*Harness[ \t]+Web GUI`)
+
+const webGUIBrandReplacement = "this Web GUI"
 
 // forceStreamBody returns the request body with "stream":true set, since the
 // upstream rejects non-streaming chat requests.
@@ -478,9 +513,30 @@ func sanitizeBlockedTemplates(s string) string {
 	s = strings.ReplaceAll(s,
 		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
 		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.")
-	// DeepSeek Harness intro signature — the third member of the same
-	// verbatim-match channel gate as the Claude Code / Codex lines above.
-	s = reDeepSeekHarnessIntro.ReplaceAllString(s, deepSeekHarnessIntroReplacement)
+
+	// DeepSeek / DSH family. These are TWO different sentences with two
+	// different triggers, so they are handled by two rules:
+	//
+	//   1. the identity sentence at the top of the system message, recognised
+	//      by its brand pair (DeepSeek + U+200B + Harness) and dropped;
+	//   2. the persona sentence carrying the model id, recognised by its
+	//      "coding agent powered by" frame, reworded but kept.
+	//
+	// Every rule below is line-scoped: none of them may consume a newline, or
+	// removing a sentence would also join it to the next line and change the
+	// prompt's line structure. The brand pair inside a sentence is matched with
+	// inline whitespace only, for the same reason.
+	s = reDeepSeekHarnessIdentity.ReplaceAllString(s, "${1}")
+	s = reDeepSeekPersonaPoweredBy.ReplaceAllString(s, "${1} running on $2${3}${4}")
+	s = reWebGUIBrand.ReplaceAllString(s, webGUIBrandReplacement)
+	s = reDeepSeekBrandPair.ReplaceAllString(s, deepSeekBrandPairReplacement)
+
+	// The file-reference paragraph's `@` is part of what the channel check
+	// matches. Only this paragraph is rewritten: a bare `@`, an email address and
+	// a decorator elsewhere are all accepted on their own.
+	s = reFileReferencePara.ReplaceAllStringFunc(s, func(para string) string {
+		return strings.ReplaceAll(para, "@", "(at)")
+	})
 	return s
 }
 

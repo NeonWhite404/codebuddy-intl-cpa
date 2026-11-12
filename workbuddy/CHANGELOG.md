@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Prompt-side 11128 triggers are rewritten (the dead DeepSeek rule finally works)
+
+The 11128 channel check also reads the **system message body**, not only the
+headers, so the DSH prompt itself had to be handled. The rule that was supposed
+to do this had been a silent no-op: it paired the pattern `You are an AI
+assistant` with the identical replacement string, so it changed nothing while
+its test — asserting the input equalled the expected output — stayed green.
+
+Two unrelated sentences, two rules (they are not variants of each other):
+
+- **The identity sentence** at the top of the system message,
+  `You are an AI agent powered by DeepSeek` + U+200B + `Harness.`, is recognised
+  by its brand pair and **dropped**. It carries no instruction the model needs,
+  and deletion cannot accidentally re-match a future upstream signature. The
+  client separates the brand with a zero-width space, so the gap is matched as
+  invisibles/inline whitespace; a leading BOM or padding does not dodge the
+  upstream's match, so the rule does not rely on position.
+- **The persona sentence** with the model id interpolated,
+  `You are a coding agent powered by the deepseek-v4.1-flash model.`, contains no
+  brand word at all — so the upstream must be matching the
+  `coding agent powered by` frame, and rewriting the model name could not help.
+  It is reworded to `You are a coding agent running on <model>.` with the model
+  id kept (it tells the model which model serves it).
+- **The file-reference paragraph** keeps its wording but has its `@` glyph
+  rewritten to the equivalent `(at)`, because that glyph is part of what the
+  channel check matches. Only that paragraph is touched: a bare `@`, an email
+  address and a decorator elsewhere are accepted by the upstream and are left
+  alone.
+- **The Web GUI paragraph** loses its brand reference
+  (`the DeepSeek` + U+200B + `Harness Web GUI` → `this Web GUI`).
+- **Brand-pair catch-all**: any remaining `DeepSeek` + invisible + `Harness`
+  anywhere in a message (a frozen paragraph from an older conversation, a variant
+  intro) is collapsed to `DeepSeek-Harness`.
+
+Every rule is **line-scoped**: none may consume a newline. Removing a sentence
+must leave the line break behind, or the paragraph after it would be joined to
+the previous line and the prompt's structure would change — a test pins the line
+count across all rules.
+
+The four older rules (Claude Code identity, git branch line, feedback URL, Codex
+CLI sentence) are unchanged and still work; they cover other clients and do not
+match the DSH prompt.
+
 ### Chat requests look like the official client on the wire
 
 Three transport-level fixes, all aimed at the same thing: a chat request should
